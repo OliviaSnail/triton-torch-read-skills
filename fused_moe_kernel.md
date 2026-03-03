@@ -10,11 +10,11 @@
 
 的 **融合矩阵乘法计算**，并把结果写回输出矩阵 C。
 
-从数学上可以抽象为，对于每个路由后的 token 行 \(m\) 与对应 expert \(e\)，计算：
+从数学上可以抽象为，对于每个路由后的 token 行 m 与对应 expert e，计算：
 
 $$
 C[m, n]
-  = \Bigg( \sum_{k=0}^{K-1} A[m, k] \cdot W_e[n, k] \Bigg)
+  = \left( \sum_{k=0}^{K-1} A[m, k] \cdot W_e[n, k] \right)
     \cdot \text{scale}_{A,B}(m, n)
     \cdot w_{\text{gate}}(m)
     + \text{bias}_e[n]
@@ -22,12 +22,12 @@ $$
 
 其中：
 
-- \(A \in \mathbb{R}^{EM \times K}\)：路由+排序+padding 后的 token 激活；
-- \(W_e \in \mathbb{R}^{N \times K}\)：第 \(e\) 个 expert 的权重矩阵；
-- \(C \in \mathbb{R}^{EM \times N}\)：输出；
-- \(\text{scale}_{A,B}\) 来自量化方案（fp8/int8）；
-- \(w_{\text{gate}}(m)\) 是该 token 对应的 MoE gate 权重；
-- \(\text{bias}_e\) 是 expert bias（可选）。
+- $A \in \mathbb{R}^{EM \times K}$：路由 + 排序 + padding 后的 token 激活；
+- $W_e \in \mathbb{R}^{N \times K}$：第 $e$ 个 expert 的权重矩阵；
+- $C \in \mathbb{R}^{EM \times N}$：输出；
+- $\text{scale}_{A,B}$ 来自量化方案（fp8/int8）；
+- $w_{\text{gate}}(m)$ 是该 token 对应的 MoE gate 权重；
+- $\text{bias}_e$ 是 expert bias（可选）。
 
 kernel 通过合理的 tile 划分（`BLOCK_SIZE_M/N/K`）和 group 调度（`GROUP_SIZE_M`），在单个 Triton kernel 中完成上述所有操作，减少内存访存和 kernel launch 数量。
 
@@ -38,60 +38,54 @@ kernel 通过合理的 tile 划分（`BLOCK_SIZE_M/N/K`）和 group 调度（`GR
 
 ### 主要张量参数
 
-```markdown
 | 参数名                     | 含义                                                                 | 典型 shape / 类型                              |
 |----------------------------|----------------------------------------------------------------------|-----------------------------------------------|
-| a_ptr                      | token 激活矩阵 A 的数据指针                                         | 逻辑形状约为 [EM, K]                          |
-| a_desc                     | A 的 Tensor Descriptor（TMA 描述符，可选）                          | TensorDescriptor 或 None                      |
-| b_ptr                      | expert 权重矩阵 B 的数据指针                                       | 逻辑形状 [E, N, K]                            |
-| b_desc                     | B 的 Tensor Descriptor（TMA 描述符，可选）                          | TensorDescriptor 或 None                      |
-| bias_ptr                   | expert bias 的数据指针（可选）                                     | 逻辑形状 [E, N]                               |
-| c_ptr                      | 输出矩阵 C 的数据指针                                              | 逻辑形状 [EM, N]                              |
-| a_scale_ptr                | A 的量化 scale 数据指针（fp8/int8 时使用）                          | tensor-wise / channel-wise / block-wise       |
-| b_scale_ptr                | B 的量化 scale 数据指针                                             | 同上                                          |
-| topk_weights_ptr           | 路由后每个 token 的 gate 权重                                       | 一维数组（长度 ≥ num_valid_tokens）           |
-| sorted_token_ids_ptr       | 排序后的 token 索引序列                                             | [EM]                                          |
-| expert_ids_ptr             | 每个 M-block 对应的 expert id                                       | [ceil(EM / BLOCK_SIZE_M)]                     |
-| num_tokens_post_padded_ptr | 路由+padding 后 token 总数 EM                                      | 标量                                          |
-```
+| `a_ptr`                    | token 激活矩阵 A 的数据指针                                         | 逻辑形状约为 `[EM, K]`                        |
+| `a_desc`                   | A 的 Tensor Descriptor（TMA 描述符，可选）                          | `TensorDescriptor` 或 `None`                  |
+| `b_ptr`                    | expert 权重矩阵 B 的数据指针                                       | 逻辑形状 `[E, N, K]`                          |
+| `b_desc`                   | B 的 Tensor Descriptor（TMA 描述符，可选）                          | `TensorDescriptor` 或 `None`                  |
+| `bias_ptr`                 | expert bias 的数据指针（可选）                                      | 逻辑形状 `[E, N]`                             |
+| `c_ptr`                    | 输出矩阵 C 的数据指针                                              | 逻辑形状 `[EM, N]`                            |
+| `a_scale_ptr`              | A 的量化 scale 数据指针（fp8/int8 时使用）                          | tensor-wise / channel-wise / block-wise       |
+| `b_scale_ptr`              | B 的量化 scale 数据指针                                             | 同上                                          |
+| `topk_weights_ptr`         | 路由后每个 token 的 gate 权重                                       | 一维数组（长度 ≥ `num_valid_tokens`）         |
+| `sorted_token_ids_ptr`     | 排序后的 token 索引序列                                             | `[EM]`                                        |
+| `expert_ids_ptr`           | 每个 M-block 对应的 expert id                                       | `[ceil(EM / BLOCK_SIZE_M)]`                   |
+| `num_tokens_post_padded_ptr` | 路由 + padding 后 token 总数 EM                                  | 标量                                          |
 
 ### 维度与 stride 参数
 
-```markdown
-| 参数名        | 含义                                             | 类型           |
-|---------------|--------------------------------------------------|----------------|
-| N             | 输出维度（等于 B 的第二维）                      | int            |
-| K             | 输入维度（等于 B 的第三维，可能含 padding）      | int            |
-| EM            | 路由+padding 后的 token 总数                     | int            |
-| num_valid_tokens | 真实有效 token 数（不含 padding）           | int            |
-| stride_am/ak  | A 在 M/K 维上的 stride                           | int            |
-| stride_be/bk/bn | B 在 expert/K/N 维上的 stride                  | int            |
-| stride_bias_e/n | bias 在 expert/N 维上的 stride                 | int            |
-| stride_cm/cn  | C 在 M/N 维上的 stride                           | int            |
-| stride_asm/ask | A_scale 在 token/K 维上的 stride                | int            |
-| stride_bse/bsk/bsn | B_scale 在 expert/K/N 维上的 stride         | int            |
-```
+| 参数名              | 含义                                             | 类型  |
+|---------------------|--------------------------------------------------|-------|
+| `N`                 | 输出维度（等于 B 的第二维）                      | int   |
+| `K`                 | 输入维度（等于 B 的第三维，可能含 padding）      | int   |
+| `EM`                | 路由 + padding 后的 token 总数                   | int   |
+| `num_valid_tokens`  | 真实有效 token 数（不含 padding）                | int   |
+| `stride_am`, `stride_ak` | A 在 M/K 维上的 stride                      | int   |
+| `stride_be`, `stride_bk`, `stride_bn` | B 在 expert/K/N 维上的 stride  | int   |
+| `stride_bias_e`, `stride_bias_n` | bias 在 expert/N 维上的 stride      | int   |
+| `stride_cm`, `stride_cn` | C 在 M/N 维上的 stride                      | int   |
+| `stride_asm`, `stride_ask` | `a_scale` 在 token/K 维上的 stride       | int   |
+| `stride_bse`, `stride_bsk`, `stride_bsn` | `b_scale` 在 expert/K/N 维上的 stride | int |
 
 ### 量化与调度相关 meta 参数
 
-```markdown
 | 参数名             | 含义                                                        | 类型              |
 |--------------------|-------------------------------------------------------------|-------------------|
-| group_n, group_k   | block-wise 量化的 N/K 向 block 大小                         | tl.constexpr int  |
-| BLOCK_SIZE_M/N/K   | Triton tile 在 M/N/K 维度的大小                             | tl.constexpr int  |
-| GROUP_SIZE_M       | 一组中 M 向的 tile 个数，用于 grouped 调度                 | tl.constexpr int  |
-| MUL_ROUTED_WEIGHT  | 是否乘上 MoE gate 权重                                     | tl.constexpr bool |
-| top_k              | 每个 token 选择的 expert 数                                | tl.constexpr int  |
-| compute_type       | 计算/输出 dtype（如 tl.float16）                           | tl.constexpr      |
-| use_fp8_w8a8       | 是否使用 fp8 权重 + fp8 激活                               | tl.constexpr bool |
-| use_int8_w8a8      | 是否使用 int8 权重 + int8 激活                            | tl.constexpr bool |
-| use_int8_w8a16     | 是否使用 int8 权重 + fp16 激活                            | tl.constexpr bool |
-| per_channel_quant  | 是否为 per-channel quant（否则 tensor-wise 或 block-wise） | tl.constexpr bool |
-| even_Ks            | K 是否是 BLOCK_SIZE_K 的整数倍                              | tl.constexpr bool |
-| c_sorted           | 输出是否保持 sorted token 顺序                             | tl.constexpr bool |
-| filter_expert      | 是否过滤掉不在当前 expert parallel rank 的 expert (id=-1)   | tl.constexpr bool |
-| swap_ab            | 是否在某些 fp8 场景下交换 A/B 以优化 SM90 性能             | tl.constexpr bool |
-```
+| `group_n`, `group_k` | block-wise 量化的 N/K 向 block 大小                      | `tl.constexpr int`|
+| `BLOCK_SIZE_M/N/K` | Triton tile 在 M/N/K 维度的大小                             | `tl.constexpr int`|
+| `GROUP_SIZE_M`     | 一组中 M 向的 tile 个数，用于 grouped 调度                 | `tl.constexpr int`|
+| `MUL_ROUTED_WEIGHT`| 是否乘上 MoE gate 权重                                     | `tl.constexpr bool`|
+| `top_k`            | 每个 token 选择的 expert 数                                | `tl.constexpr int`|
+| `compute_type`     | 计算/输出 dtype（如 `tl.float16`）                         | `tl.constexpr`    |
+| `use_fp8_w8a8`     | 是否使用 fp8 权重 + fp8 激活                               | `tl.constexpr bool`|
+| `use_int8_w8a8`    | 是否使用 int8 权重 + int8 激活                            | `tl.constexpr bool`|
+| `use_int8_w8a16`   | 是否使用 int8 权重 + fp16 激活                            | `tl.constexpr bool`|
+| `per_channel_quant`| 是否为 per-channel quant（否则 tensor-wise 或 block-wise） | `tl.constexpr bool`|
+| `even_Ks`          | K 是否是 `BLOCK_SIZE_K` 的整数倍                           | `tl.constexpr bool`|
+| `c_sorted`         | 输出是否保持 sorted token 顺序                             | `tl.constexpr bool`|
+| `filter_expert`    | 是否过滤掉不在当前 expert parallel rank 的 expert（id=-1） | `tl.constexpr bool`|
+| `swap_ab`          | 是否在某些 fp8 场景下交换 A/B 以优化 SM90 性能             | `tl.constexpr bool`|
 
 
 ## 中间变量的 shape 流动（含 BLOCK_SIZE / stride / program_id）
@@ -111,8 +105,8 @@ pid_n = (pid % num_pid_in_group) // group_size_m
 ```
 
 - 每个 Triton program（由 `pid` 标识）负责 C 的一个 tile：
-  - 行范围：\(m \in [pid\_m \cdot BLOCK\_SIZE\_M,\ (pid\_m + 1)\cdot BLOCK\_SIZE\_M)\)；
-  - 列范围：\(n \in [pid\_n \cdot BLOCK\_SIZE\_N,\ (pid\_n + 1)\cdot BLOCK\_SIZE\_N)\)。
+  - 行范围：$m \in [pid_m \cdot BLOCK\_SIZE\_M,\ (pid_m + 1)\cdot BLOCK\_SIZE\_M)$；
+  - 列范围：$n \in [pid_n \cdot BLOCK\_SIZE\_N,\ (pid_n + 1)\cdot BLOCK\_SIZE\_N)$。
 - `GROUP_SIZE_M` 将若干连续的 M tiles 编为一组，在组内沿 N 方向遍历，有利于复用同一 expert 权重的 L2 cache。
 
 ### 2. token 索引与有效 mask
@@ -127,7 +121,7 @@ offs_token = offs_token.to(tl.int64)
 token_mask = offs_token < num_valid_tokens
 ```
 
-- `offs_token_id`：当前 tile 的 EM 维下标（在排序+padding 后的序列中的 index）；
+- `offs_token_id`：当前 tile 的 EM 维下标（在排序 + padding 后的序列中的 index）；
 - `offs_token`：真正映射到「路由后的 token 索引」，部分位置可能是 padding；
 - `token_mask`：标记哪些行是有效 token（`offs_token < num_valid_tokens`）。
 
@@ -149,7 +143,7 @@ if filter_expert and off_experts == -1:
 ```
 
 - 每个 `pid_m`（即一个 `BLOCK_SIZE_M` 行块）对应一个 expert id；
-- 当该 expert 不在当前 expert parallel rank 上时（id 为 \(-1\)），直接调用 `write_zeros_to_output` 把对应输出块清零并返回，避免无效计算。
+- 当该 expert 不在当前 expert parallel rank 上时（id 为 -1），直接调用 `write_zeros_to_output` 把对应输出块清零并返回，避免无效计算。
 
 ### 4. A/B 的 BLOCK 与 stride 地址计算
 
@@ -166,15 +160,15 @@ else:
     )
 ```
 
-- `offs_token[:, None] // top_k`：大小为 \([BLOCK\_SIZE\_M, 1]\)，将「路由后重复了 `top_k` 次的 token 行」还原到原始 token 行号；
-- `offs_k[None, :]`：大小为 \([1, BLOCK\_SIZE\_K]\)，对 K 向量做偏移；
-- 广播后，`a_ptrs` 是一个 \([BLOCK\_SIZE\_M, BLOCK\_SIZE\_K]\) 的地址网格：
+- `offs_token[:, None] // top_k`：大小为 `[BLOCK_SIZE_M, 1]`，将「路由后重复了 `top_k` 次的 token 行」还原到原始 token 行号；
+- `offs_k[None, :]`：大小为 `[1, BLOCK_SIZE_K]`，对 K 向量做偏移；
+- 广播后，`a_ptrs` 是一个 `[BLOCK_SIZE_M, BLOCK_SIZE_K]` 的地址网格，对应：
 
-  $$
-  A\_{\text{block}}(i, j)
-    = A\Big[ \big\lfloor \tfrac{\text{offs\_token}[i]}{\text{top\_k}} \big\rfloor,
-              k\_{\text{base}} + j \Big]
-  $$
+$$
+A_{\text{block}}(i, j)
+  = A\Big( \big\lfloor \tfrac{\text{offs\_token}[i]}{\text{top\_k}} \big\rfloor,
+           k_{\text{base}} + j \Big)
+$$
 
 #### B：expert 权重块
 
@@ -189,16 +183,16 @@ else:
     )
 ```
 
-- `offs_k[:, None]`：大小为 \([BLOCK\_SIZE\_K, 1]\)，对应输入维度 K；
-- `offs_bn[None, :]`：大小为 \([1, BLOCK\_SIZE\_N]\)，对应输出维度 N；
-- 广播后，`b_ptrs` 是一个 \([BLOCK\_SIZE\_K, BLOCK\_SIZE\_N]\) 的地址网格：
+- `offs_k[:, None]`：大小为 `[BLOCK_SIZE_K, 1]`，对应输入维度 K；
+- `offs_bn[None, :]`：大小为 `[1, BLOCK_SIZE_N]`，对应输出维度 N；
+- 广播后，`b_ptrs` 是一个 `[BLOCK_SIZE_K, BLOCK_SIZE_N]` 的地址网格，对应：
 
-  $$
-  B\_{\text{block}}(k, n)
-    = B\_{e}\big[ n\_{\text{base}} + n,\, k\_{\text{base}} + k \big]
-  $$
+$$
+B_{\text{block}}(k, n)
+  = B_e\big( n_{\text{base}} + n,\ k_{\text{base}} + k \big)
+$$
 
-使用 TMA (`a_desc` / `b_desc`) 时，上述逻辑由 descriptor 内部封装。
+使用 TMA（`a_desc` / `b_desc`）时，上述逻辑由 descriptor 内部封装。
 
 ### 5. 沿 K 维循环与 accumulator 的形状
 
@@ -239,11 +233,11 @@ for k_start in range(0, K, BLOCK_SIZE_K):
 
 不考虑 `swap_ab` 时：
 
-- \(a \in \mathbb{R}^{BLOCK\_SIZE\_M \times BLOCK\_SIZE\_K}\)；
-- \(b \in \mathbb{R}^{BLOCK\_SIZE\_K \times BLOCK\_SIZE\_N}\)；
-- `tl.dot(a, b)` 的结果 \(\in \mathbb{R}^{BLOCK\_SIZE\_M \times BLOCK\_SIZE\_N}\)，累加进 `accumulator`。
+- $a \in \mathbb{R}^{BLOCK\_SIZE\_M \times BLOCK\_SIZE\_K}$；
+- $b \in \mathbb{R}^{BLOCK\_SIZE\_K \times BLOCK\_SIZE\_N}$；
+- `tl.dot(a, b)` 的结果 $\in \mathbb{R}^{BLOCK\_SIZE\_M \times BLOCK\_SIZE\_N}$，累加进 `accumulator`。
 
-考虑 `swap_ab=True` 时，会通过 `tl.trans` 在适当时机交换维度，保证最后写回 C 时仍为 `[BLOCK_SIZE_M, BLOCK_SIZE_N]` 的布局。
+考虑 `swap_ab = True` 时，会通过 `tl.trans` 在适当时机交换维度，保证最后写回 C 时仍为 `[BLOCK_SIZE_M, BLOCK_SIZE_N]` 的布局。
 
 
 ## 关键算子：含义与用法
@@ -294,10 +288,10 @@ c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
 
 ### `tl.load` / `tl.store`（带 mask）
 
-- **`tl.load(ptrs, mask, other)`**：
+- `tl.load(ptrs, mask, other)`：
   - 在 `mask=True` 的位置从内存加载；
   - `mask=False` 的位置返回 `other`。
-- **`tl.store(ptrs, value, mask)`**：
+- `tl.store(ptrs, value, mask)`：
   - 在 `mask=True` 的位置写入，`False` 的位置忽略。
 
 示例：
@@ -322,14 +316,17 @@ tl.store(c_ptrs, accumulator, mask=c_mask)
 - **形状规则**：
 
 如果：
-\[
+
+$$
 a \in \mathbb{R}^{M \times K},\quad
 b \in \mathbb{R}^{K \times N}
-\]
+$$
+
 则：
-\[
+
+$$
 \text{dot}(a, b) \in \mathbb{R}^{M \times N}
-\]
+$$
 
 - **在本 kernel 中**：
 
@@ -374,15 +371,15 @@ c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
 tl.store(c_ptrs, accumulator, mask=c_mask)
 ```
 
-- 逻辑形状：\([EM, N]\)；
-  - \(EM = \text{sorted\_token\_ids.shape}[0]\)：路由后 token×topk 再 padding 后的总行数；
-  - \(N = B.shape[1]\)：输出 hidden size。
-- 对每个有效 token 行 \(m\)，对应一行：
+- 逻辑形状：`[EM, N]`：
+  - $EM = \text{sorted\_token\_ids.shape}[0]$：路由后 token × topk 再 padding 后的总行数；
+  - $N = B.shape[1]$：输出 hidden size。
+- 对每个有效 token 行 m，对应一行：
 
-  $$
-  C[m, :] \approx \big(A[m, :] \cdot W\_{e(m)}^\top\big) \cdot \text{scale}_{A,B}(m, :)
-                  \cdot w_{\text{gate}}(m) + \text{bias}_{e(m)}
-  $$
+$$
+C[m, :] \approx \big(A[m, :] \cdot W_{e(m)}^\top\big) \cdot \text{scale}_{A,B}(m, :)
+                \cdot w_{\text{gate}}(m) + \text{bias}_{e(m)}
+$$
 
 - `c_sorted` 决定写回时是按：
   - `offs_token_id`（sorted 序列下标）；
@@ -411,3 +408,4 @@ tl.store(c_ptrs, accumulator, mask=c_mask)
 - kernel launch 次数和调度开销。
 
 这对于大规模 MoE 推理（尤其是多 expert、量化权重、需要高吞吐的场景）而言，可以显著减轻 memory bandwidth 压力，并提升端到端性能。
+
