@@ -235,11 +235,11 @@ for k_start in range(0, K, BLOCK_SIZE_K):
     ...
 ```
 
-不考虑 `swap_ab` 时：
+不考虑 `swap_ab` 时，可以把当前 tile 的形状抽象写成：
 
-- $a \in \mathbb{R}^{\mathrm{BLOCK\_SIZE\_M} \times \mathrm{BLOCK\_SIZE\_K}}$；
-- $b \in \mathbb{R}^{\mathrm{BLOCK\_SIZE\_K} \times \mathrm{BLOCK\_SIZE\_N}}$；
-- `tl.dot(a, b)` 的结果 $\in \mathbb{R}^{\mathrm{BLOCK\_SIZE\_M} \times \mathrm{BLOCK\_SIZE\_N}}$，累加进 `accumulator`。
+- $a \in \mathbb{R}^{M \times K}$；
+- $b \in \mathbb{R}^{K \times N}$；
+- `tl.dot(a, b)` 的结果 $\in \mathbb{R}^{M \times N}$，累加进 `accumulator`。
 
 考虑 `swap_ab = \mathrm{True}` 时，会通过 `tl.trans` 在适当时机交换维度，保证最后写回 C 时仍为 `[BLOCK_SIZE_M, BLOCK_SIZE_N]` 的布局。
 
@@ -412,3 +412,4 @@ $$
 
 这对于大规模 MoE 推理（尤其是多 expert、量化权重、需要高吞吐的场景）而言，可以显著减轻 memory bandwidth 压力，并提升端到端性能。
 
+****
