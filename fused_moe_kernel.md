@@ -1,4 +1,4 @@
-## 代码类型与整体概览
+# 一、代码概览
 
 `fused_moe_kernel` 是一个使用 `@triton.jit` 装饰的 **Triton kernel**，实现了 Mixture-of-Experts（MoE）中：
 
@@ -10,7 +10,7 @@
 
 的 **融合矩阵乘法计算**，并把结果写回输出矩阵 C。
 
-从数学上可以抽象为，对于每个路由后的 token 行 m 与对应 expert e，计算：
+从数学上可以抽象为，对于每个路由后的 token 行 $m$ 与对应 expert $e$，计算：
 
 $$
 C[m, n]
@@ -32,11 +32,11 @@ $$
 kernel 通过合理的 tile 划分（`BLOCK_SIZE_M/N/K`）和 group 调度（`GROUP_SIZE_M`），在单个 Triton kernel 中完成上述所有操作，减少内存访存和 kernel launch 数量。
 
 
-## 函数输入：含义与 shape
+# 二、函数输入：含义与 shape
 
 下面以逻辑张量 / 标量的视角整理 `fused_moe_kernel` 的重要参数。
 
-### 主要张量参数
+## 1. 主要张量参数
 
 | 参数名                     | 含义                                                                 | 典型 shape / 类型                              |
 |----------------------------|----------------------------------------------------------------------|-----------------------------------------------|
@@ -53,7 +53,7 @@ kernel 通过合理的 tile 划分（`BLOCK_SIZE_M/N/K`）和 group 调度（`GR
 | `expert_ids_ptr`           | 每个 M-block 对应的 expert id                                       | `[ceil(EM / BLOCK_SIZE_M)]`                   |
 | `num_tokens_post_padded_ptr` | 路由 + padding 后 token 总数 EM                                  | 标量                                          |
 
-### 维度与 stride 参数
+## 2. 维度与 stride 参数
 
 | 参数名              | 含义                                             | 类型  |
 |---------------------|--------------------------------------------------|-------|
@@ -68,7 +68,7 @@ kernel 通过合理的 tile 划分（`BLOCK_SIZE_M/N/K`）和 group 调度（`GR
 | `stride_asm`, `stride_ask` | `a_scale` 在 token/K 维上的 stride       | int   |
 | `stride_bse`, `stride_bsk`, `stride_bsn` | `b_scale` 在 expert/K/N 维上的 stride | int |
 
-### 量化与调度相关 meta 参数
+## 3. 量化与调度相关 meta 参数
 
 | 参数名             | 含义                                                        | 类型              |
 |--------------------|-------------------------------------------------------------|-------------------|
@@ -88,9 +88,9 @@ kernel 通过合理的 tile 划分（`BLOCK_SIZE_M/N/K`）和 group 调度（`GR
 | `swap_ab`          | 是否在某些 fp8 场景下交换 A/B 以优化 SM90 性能             | `tl.constexpr bool`|
 
 
-## 中间变量的 shape 流动（含 BLOCK_SIZE / stride / program_id）
+# 三、中间变量的 shape 流动（含 BLOCK_SIZE / stride / program_id）
 
-### 1. program id 到 C 中 tile 的映射
+## 1. program id 到 C 中 tile 的映射
 
 ```python
 pid = tl.program_id(axis=0)
@@ -109,7 +109,7 @@ pid_n = (pid % num_pid_in_group) // group_size_m
   - 列范围：$n \in [pid_n \cdot BLOCK\_SIZE\_N,\ (pid_n + 1)\cdot BLOCK\_SIZE\_N)$。
 - `GROUP_SIZE_M` 将若干连续的 M tiles 编为一组，在组内沿 N 方向遍历，有利于复用同一 expert 权重的 L2 cache。
 
-### 2. token 索引与有效 mask
+## 2. token 索引与有效 mask
 
 ```python
 num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
@@ -127,7 +127,7 @@ token_mask = offs_token < num_valid_tokens
 
 后续加载 A 与写回 C 时都会用到 `token_mask`，避免访问 padding 区域。
 
-### 3. expert 选择与过滤
+## 3. expert 选择与过滤
 
 ```python
 off_experts_i32 = tl.load(expert_ids_ptr + pid_m)
@@ -145,9 +145,9 @@ if filter_expert and off_experts == -1:
 - 每个 `pid_m`（即一个 `BLOCK_SIZE_M` 行块）对应一个 expert id；
 - 当该 expert 不在当前 expert parallel rank 上时（id 为 -1），直接调用 `write_zeros_to_output` 把对应输出块清零并返回，避免无效计算。
 
-### 4. A/B 的 BLOCK 与 stride 地址计算
+## 4. A/B 的 BLOCK 与 stride 地址计算
 
-#### A：token 激活块
+### A：token 激活块
 
 ```python
 offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
@@ -170,7 +170,7 @@ A_{\text{block}}(i, j)
            k_{\text{base}} + j \Big)
 $$
 
-#### B：expert 权重块
+### B：expert 权重块
 
 ```python
 if b_desc is not None:
@@ -194,7 +194,7 @@ $$
 
 使用 TMA（`a_desc` / `b_desc`）时，上述逻辑由 descriptor 内部封装。
 
-### 5. 沿 K 维循环与 accumulator 的形状
+## 5. 沿 K 维循环与 accumulator 的形状
 
 ```python
 if swap_ab:
@@ -240,11 +240,11 @@ for k_start in range(0, K, BLOCK_SIZE_K):
 考虑 `swap_ab = True` 时，会通过 `tl.trans` 在适当时机交换维度，保证最后写回 C 时仍为 `[BLOCK_SIZE_M, BLOCK_SIZE_N]` 的布局。
 
 
-## 关键算子：含义与用法
+# 四、关键算子：含义与用法
 
 本节只列出对理解 kernel 至关重要的 Triton 原语及其用法。
 
-### `tl.program_id`
+## 1. `tl.program_id`
 
 - **语义**：返回当前 kernel 实例在给定 axis 上的 program id（类似 CUDA 的 blockIdx）。
 - **形状**：标量整型。
@@ -260,7 +260,7 @@ def example(x_ptr, BLOCK: tl.constexpr):
 
 在 `fused_moe_kernel` 中，`pid` 用来映射到 C 中的 tile `(pid_m, pid_n)`。
 
-### `tl.arange` + stride 地址计算
+## 2. `tl.arange` + stride 地址计算
 
 - **语义**：在 `[start, end)` 范围内生成一维等差整数向量，常用来构造二维网格索引并结合 stride 做矩阵访问。
 - **在本 kernel 中**，典型用法：
@@ -286,7 +286,7 @@ $$
 c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
 ```
 
-### `tl.load` / `tl.store`（带 mask）
+## 3. `tl.load` / `tl.store`（带 mask）
 
 - `tl.load(ptrs, mask, other)`：
   - 在 `mask=True` 的位置从内存加载；
@@ -310,7 +310,7 @@ tl.store(c_ptrs, accumulator, mask=c_mask)
 - token 方向的 padding（`token_mask`）；
 - K 方向不足一整 block 的尾部（`offs_k < K - k_start`）。
 
-### `tl.dot`
+## 4. `tl.dot`
 
 - **语义**：二维矩阵乘（缩并最后一维 / 第一维）。
 - **形状规则**：
@@ -340,7 +340,7 @@ accumulator = tl.dot(a, b, acc=accumulator)
 accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
 ```
 
-### 量化相关：scale 与 cast
+## 5. 量化相关：scale 与 cast
 
 - 典型的「解量化 + dot」流程：
 
@@ -355,7 +355,7 @@ accumulator = tl.dot(a, b, acc=accumulator)
 - block-wise / channel-wise / tensor-wise 的区别，体现在 `a_scale` / `b_scale` 的索引方式以及是「在循环中按 block 更新」还是「在循环结束后整体乘」。
 
 
-## 函数输出：含义与 shape
+# 五、函数输出：含义与 shape
 
 kernel 通过 `tl.store` 将 `accumulator` 写回 `c_ptr` 所指向的输出矩阵 C：
 
@@ -374,7 +374,7 @@ tl.store(c_ptrs, accumulator, mask=c_mask)
 - 逻辑形状：`[EM, N]`：
   - $EM = \text{sorted\_token\_ids.shape}[0]$：路由后 token × topk 再 padding 后的总行数；
   - $N = B.shape[1]$：输出 hidden size。
-- 对每个有效 token 行 m，对应一行：
+- 对每个有效 token 行 $m$，对应一行：
 
 $$
 C[m, :] \approx \big(A[m, :] \cdot W_{e(m)}^\top\big) \cdot \text{scale}_{A,B}(m, :)
@@ -386,7 +386,7 @@ $$
   - 还是 `offs_token`（路由后 token 索引）。
 
 
-## 整体功能总结
+# 六、整体功能总结
 
 从 MoE 系统视角看，`fused_moe_kernel` 是一个 **高度融合的「路由 + 量化解码 + GEMM + bias + gate 权重」kernel**：
 
@@ -408,4 +408,3 @@ $$
 - kernel launch 次数和调度开销。
 
 这对于大规模 MoE 推理（尤其是多 expert、量化权重、需要高吞吐的场景）而言，可以显著减轻 memory bandwidth 压力，并提升端到端性能。
-
