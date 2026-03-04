@@ -15,9 +15,9 @@
 $$
 C[m, n]
   = \left( \sum_{k=0}^{K-1} A[m, k] \cdot W_e[n, k] \right)
-    \cdot \text{scale}_{A,B}(m, n)
-    \cdot w_{\text{gate}}(m)
-    + \text{bias}_e[n]
+    \cdot \mathrm{scale}_{A,B}(m, n)
+    \cdot w_{\mathrm{gate}}(m)
+    + \mathrm{bias}_e[n]
 $$
 
 其中：
@@ -25,9 +25,9 @@ $$
 - $A \in \mathbb{R}^{EM \times K}$：路由 + 排序 + padding 后的 token 激活；
 - $W_e \in \mathbb{R}^{N \times K}$：第 $e$ 个 expert 的权重矩阵；
 - $C \in \mathbb{R}^{EM \times N}$：输出；
-- $\text{scale}_{A,B}$ 来自量化方案（fp8/int8）；
-- $w_{\text{gate}}(m)$ 是该 token 对应的 MoE gate 权重；
-- $\text{bias}_e$ 是 expert bias（可选）。
+- $\mathrm{scale}_{A,B}$ 来自量化方案（fp8/int8）；
+- $w_{\mathrm{gate}}(m)$ 是该 token 对应的 MoE gate 权重；
+- $\mathrm{bias}_e$ 是 expert bias（可选）。
 
 kernel 通过合理的 tile 划分（`BLOCK_SIZE_M/N/K`）和 group 调度（`GROUP_SIZE_M`），在单个 Triton kernel 中完成上述所有操作，减少内存访存和 kernel launch 数量。
 
@@ -105,8 +105,14 @@ pid_n = (pid % num_pid_in_group) // group_size_m
 ```
 
 - 每个 Triton program（由 `pid` 标识）负责 C 的一个 tile：
-  - 行范围：$m \in [pid_m \cdot BLOCK\_SIZE\_M,\ (pid_m + 1)\cdot BLOCK\_SIZE\_M)$；
-  - 列范围：$n \in [pid_n \cdot BLOCK\_SIZE\_N,\ (pid_n + 1)\cdot BLOCK\_SIZE\_N)$。
+  - 行范围：
+
+    $$m \in [pid_m \cdot BLOCK\_SIZE\_M,\ (pid_m + 1)\cdot BLOCK\_SIZE\_M)$$
+
+  - 列范围：
+
+    $$n \in [pid_n \cdot BLOCK\_SIZE\_N,\ (pid_n + 1)\cdot BLOCK\_SIZE\_N)$$
+
 - `GROUP_SIZE_M` 将若干连续的 M tiles 编为一组，在组内沿 N 方向遍历，有利于复用同一 expert 权重的 L2 cache。
 
 ## 2. token 索引与有效 mask
@@ -124,8 +130,6 @@ token_mask = offs_token < num_valid_tokens
 - `offs_token_id`：当前 tile 的 EM 维下标（在排序 + padding 后的序列中的 index）；
 - `offs_token`：真正映射到「路由后的 token 索引」，部分位置可能是 padding；
 - `token_mask`：标记哪些行是有效 token（`offs_token < num_valid_tokens`）。
-
-后续加载 A 与写回 C 时都会用到 `token_mask`，避免访问 padding 区域。
 
 ## 3. expert 选择与过滤
 
@@ -165,9 +169,9 @@ else:
 - 广播后，`a_ptrs` 是一个 `[BLOCK_SIZE_M, BLOCK_SIZE_K]` 的地址网格，对应：
 
 $$
-A_{\text{block}}(i, j)
-  = A\Big( \big\lfloor \tfrac{\text{offs\_token}[i]}{\text{top\_k}} \big\rfloor,
-           k_{\text{base}} + j \Big)
+A_{\mathrm{block}}(i, j)
+  = A\Big( \big\lfloor \tfrac{\mathrm{offsToken}_i}{\mathrm{topK}} \big\rfloor,
+           k_{\mathrm{base}} + j \Big)
 $$
 
 ### B：expert 权重块
@@ -188,8 +192,8 @@ else:
 - 广播后，`b_ptrs` 是一个 `[BLOCK_SIZE_K, BLOCK_SIZE_N]` 的地址网格，对应：
 
 $$
-B_{\text{block}}(k, n)
-  = B_e\big( n_{\text{base}} + n,\ k_{\text{base}} + k \big)
+B_{\mathrm{block}}(k, n)
+  = B_e\big( n_{\mathrm{base}} + n,\ k_{\mathrm{base}} + k \big)
 $$
 
 使用 TMA（`a_desc` / `b_desc`）时，上述逻辑由 descriptor 内部封装。
@@ -233,11 +237,11 @@ for k_start in range(0, K, BLOCK_SIZE_K):
 
 不考虑 `swap_ab` 时：
 
-- $a \in \mathbb{R}^{BLOCK\_SIZE\_M \times BLOCK\_SIZE\_K}$；
-- $b \in \mathbb{R}^{BLOCK\_SIZE\_K \times BLOCK\_SIZE\_N}$；
-- `tl.dot(a, b)` 的结果 $\in \mathbb{R}^{BLOCK\_SIZE\_M \times BLOCK\_SIZE\_N}$，累加进 `accumulator`。
+- $a \in \mathbb{R}^{\mathrm{BLOCK\_SIZE\_M} \times \mathrm{BLOCK\_SIZE\_K}}$；
+- $b \in \mathbb{R}^{\mathrm{BLOCK\_SIZE\_K} \times \mathrm{BLOCK\_SIZE\_N}}$；
+- `tl.dot(a, b)` 的结果 $\in \mathbb{R}^{\mathrm{BLOCK\_SIZE\_M} \times \mathrm{BLOCK\_SIZE\_N}}$，累加进 `accumulator`。
 
-考虑 `swap_ab = True` 时，会通过 `tl.trans` 在适当时机交换维度，保证最后写回 C 时仍为 `[BLOCK_SIZE_M, BLOCK_SIZE_N]` 的布局。
+考虑 `swap_ab = \mathrm{True}` 时，会通过 `tl.trans` 在适当时机交换维度，保证最后写回 C 时仍为 `[BLOCK_SIZE_M, BLOCK_SIZE_N]` 的布局。
 
 
 # 四、关键算子：含义与用法
@@ -274,10 +278,10 @@ offs_k = tl.arange(0, BLOCK_SIZE_K)
 与 stride 结合时，遵循典型的地址公式：
 
 $$
-\text{addr}(m, n)
-  = \text{base}
-  + m \cdot \text{stride}_m
-  + n \cdot \text{stride}_n
+\mathrm{addr}(m, n)
+  = \mathrm{base}
+  + m \cdot \mathrm{stride}_m
+  + n \cdot \mathrm{stride}_n
 $$
 
 在代码中体现为：
@@ -325,7 +329,7 @@ $$
 则：
 
 $$
-\text{dot}(a, b) \in \mathbb{R}^{M \times N}
+\mathrm{dot}(a, b) \in \mathbb{R}^{M \times N}
 $$
 
 - **在本 kernel 中**：
@@ -372,18 +376,17 @@ tl.store(c_ptrs, accumulator, mask=c_mask)
 ```
 
 - 逻辑形状：`[EM, N]`：
-  - $EM = \text{sorted\_token\_ids.shape}[0]$：路由后 token × topk 再 padding 后的总行数；
-  - $N = B.shape[1]$：输出 hidden size。
+  - $EM$：等于 `sorted_token_ids.shape[0]`，即路由后 token × topk 再 padding 后的总行数；
+  - $N = B.\mathrm{shape}[1]$：输出 hidden size。
 - 对每个有效 token 行 $m$，对应一行：
 
 $$
-C[m, :] \approx \big(A[m, :] \cdot W_{e(m)}^\top\big) \cdot \text{scale}_{A,B}(m, :)
-                \cdot w_{\text{gate}}(m) + \text{bias}_{e(m)}
+C[m, :] \approx \big(A[m, :] \cdot W_{e(m)}^\top\big) \cdot \mathrm{scale}_{A,B}(m, :)
+                \cdot w_{\mathrm{gate}}(m) + \mathrm{bias}_{e(m)}
 $$
 
 - `c_sorted` 决定写回时是按：
-  - `offs_token_id`（sorted 序列下标）；
-  - 还是 `offs_token`（路由后 token 索引）。
+  - `offs_token_id`（sorted 序列下标）；\n  - 还是 `offs_token`（路由后 token 索引）。
 
 
 # 六、整体功能总结
@@ -408,3 +411,4 @@ $$
 - kernel launch 次数和调度开销。
 
 这对于大规模 MoE 推理（尤其是多 expert、量化权重、需要高吞吐的场景）而言，可以显著减轻 memory bandwidth 压力，并提升端到端性能。
+
